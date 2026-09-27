@@ -1,0 +1,5 @@
+[Definition]
+titleIds = 00050000101C9400, 00050000101C9500, 00050000101C9300
+name = "The_Eternal_Ordeal"
+path = "The Legend of Zelda: Breath of the Wild/Mods/WiiXLaunch"
+version = 7

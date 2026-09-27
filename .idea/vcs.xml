@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/exlaunch" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/libfunctionpatcher" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/libnotifications" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/wiixlaunch-botw" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/wups" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/vendor/wut" vcs="Git" />
+  </component>
+</project>
