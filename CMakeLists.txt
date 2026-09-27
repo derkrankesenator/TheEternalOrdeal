@@ -79,7 +79,8 @@ elseif(PLATFORM STREQUAL "CEMU")
     
     set(TARGET_CEMU wiixlaunch_cemu)
     add_executable(${TARGET_CEMU} ${SOURCES}
-            include/ordeal/wave_logic.hpp)
+            include/ordeal/wave_logic.hpp
+    )
 
     add_custom_command(TARGET ${TARGET_CEMU} POST_BUILD
         COMMAND powerpc-eabi-objcopy -O binary --set-section-flags .bss=alloc,load,contents $<TARGET_FILE:${TARGET_CEMU}> ${CMAKE_BINARY_DIR}/payload.bin

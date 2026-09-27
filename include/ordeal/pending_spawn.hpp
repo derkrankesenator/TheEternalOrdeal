@@ -20,7 +20,6 @@
 // (build_cemu.sh, build_wiiu.sh, the .bat files), so a new .cpp would have to
 // be added to every one of them. A header just needs the #include.
 
-#include "../wiixlaunch.hpp"
 #include "wiixlaunch/botw/botw.hpp"
 
 namespace SpawnQueue {
