@@ -1,0 +1,38 @@
+name: C/C++ CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: ubuntu-latest
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitppc:latest
+ 
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: true
+
+    - name: Build
+      run: |
+        make -j2
+        make install
+
+    - name: Build Test
+      run: |
+        cd tests
+        mkdir build && cd build
+        /opt/devkitpro/portlibs/wiiu/bin/powerpc-eabi-cmake ../
+        make -j2
+
+    - name: Build Samples (Make)
+      run: |
+        cd samples/make
+        make -j2
+
+    - name: Build Samples (CMake)
+      run: |
+        cd samples/cmake
+        mkdir build && cd build
+        /opt/devkitpro/portlibs/wiiu/bin/powerpc-eabi-cmake ../
+        make -j2

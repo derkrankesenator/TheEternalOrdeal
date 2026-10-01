@@ -1,0 +1,16 @@
+.*/
+!.github/
+build/
+release/
+debug/
+lib/
+*.a
+*.o
+*.d
+*.elf
+*.rpl
+*.rpx
+*.wuhb
+*.bz2
+docs/html/
+CMakeSettings.json

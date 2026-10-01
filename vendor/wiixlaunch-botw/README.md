@@ -1,0 +1,162 @@
+# WiiXLaunch-BotW
+
+A high-level, cross-platform (Switch / Wii U / Cemu) API for *The Legend of
+Zelda: Breath of the Wild*, built on top of [WiiXLaunch](https://github.com/TKVSC-Team/WiiXLaunch).
+This is the game-specific knowledge (vtable slots, memory offsets, actor
+spawn plumbing) promoted out of individual mods into reusable classes, so a
+new mod writes:
+
+```cpp
+#include <wiixlaunch.hpp>
+#include <wiixlaunch/botw/botw.hpp>
+
+using namespace WiiXLaunch::BotW;
+
+WiiXLaunch::BotW::Actor sword = Player::GetEquippedSword();
+if (Controller::IsPressed(Button::X)) { ... }
+```
+
+instead of hand-decoding vtable slot arithmetic or raw struct offsets per
+project.
+
+This repo is deliberately **not** part of base WiiXLaunch (the template repo
+stays a generic, game-agnostic hooking framework) - it's an optional module
+for mods that target BotW specifically, added as a git submodule by the
+projects that want it.
+
+## What's here
+
+| Header | Provides |
+| --- | --- |
+| `botw/game/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
+| `botw/game/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
+| `botw/game/pouch.hpp` | `Pouch` - equipped-item values through `PauseMenuDataMgr`, so durability changes reach the menu and the save rather than only the actor |
+| `botw/game/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
+| `botw/game/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
+| `botw/game/weather.hpp` | `Weather` - the weather system (`GetWeather`/`SetWeather`), the override the game resolves above the climate roll, plus the current climate |
+| `botw/game/climate.hpp` | `Climate` - the ambient temperature (`GetTemperature`/`SetTemperature`, aliased `Get`/`SetClimate`), recomputed from the climate curves, altitude and the clock |
+| `botw/game/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
+| `botw/game/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
+| `botw/game/region.hpp` | `Region` - the fifteen regions as PLACES: which one a world position is in (`GetRegionAt`, off the game's own `Ecosystem/MapTower.beco` raster), whether the player may enter it (`Get`/`SetRegionUnlock`, `SyncFromTowers`), and invisible walls built along the borders of the locked ones from spawned `AirWallCurseGanon` panels - see `docs/region-walls.md` |
+| `botw/game/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
+| `botw/game/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core), input injection, and input capture (hide the pad from the game while a menu is up) |
+| `botw/game/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
+| `botw/game/display.hpp` | `Display` - the aspect ratio the frame is actually presented at, read from the game's own constant (which a Cemu ultrawide pack has to rewrite), so 21:9 is detected rather than configured |
+| `botw/graphics/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
+| `botw/graphics/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`), plus pre-tiled surface upload (`CreateTextureFromSurface`) and batched quads (`BeginBatch`/`BatchQuad`/`EndBatch`) for the GUI |
+| `botw/gui/gui.hpp` | `GUI` - immediate-mode in-game UI in the base game's own style: dialogue boxes, rounded option rows, cursors, selection frames and focus-navigated widgets (`Button`, `Toggle`, `Slider`, `Selector`), set in the game's own fonts and drawn with its own layout art, streamed out of `Font_XX.sbfarc` / `Layout/Common.sblarc` at runtime so a mod ships no assets - see `docs/gui.md` |
+| `botw/platform/log.hpp` | `OSLog` - Cemu-only logger (`OSReport`), used internally by `GX2` for its own diagnostics |
+| `botw/botw.hpp` | Umbrella include for all of the above |
+
+`botw/graphics/gfd.hpp`, `botw/graphics/gx2_shader_types.hpp`, and `botw/graphics/gx2_imports.hpp` are internal support headers `gx2.hpp` builds on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real GX2 calls from a bare code cave" shim table). File access has moved out of this module entirely: `WiiXLaunch::FS` is now base WiiXLaunch's `<wiixlaunch/fs.hpp>`, and the coreinit shim tables it and `log.hpp` resolve against live there too, as `wiixlaunch/cemu/cemu_fs.hpp` and `wiixlaunch/cemu/cemu_logging.hpp`. FS and OSReport are coreinit exports reachable in any Wii U title, and base's own logger and module loader depend on them, so they cannot sit behind "is this module installed". GX2 stays here. The GUI adds `botw/graphics/bffnt.hpp` and `bflim.hpp` (the game's font and layout-texture formats), `botw/platform/yaz0.hpp` and `sarc.hpp` (a streaming Yaz0 decoder and SARC lookup, so the 31 MB layout archive is never held in memory), and `botw/gui/gui_types.hpp`, `gui_render.hpp`, `gui_text.hpp`, `gui_assets.hpp` behind `gui.hpp`. Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
+
+Public API headers live under `botw/game/` and `botw/graphics/`; `botw/platform/` is internal-only (game-side plumbing over the base framework's Cemu/Wii U shims), grouped this way so the split doubles as documentation of what a mod is actually meant to reach for. `src/cemu/*.asm` (now just `gx2_imports.asm`, the table `graphics/gx2_imports.hpp` resolves against) stays at that exact path - the base WiiXLaunch template's `scripts/deploy.py` scans `vendor/wiixlaunch-*/src/cemu/` by hardcoded path to splice these into the Cemu payload, so it can't move without also patching that scanner in the base repo.
+
+Every offset and vtable slot here was reverse-engineered against the game
+binaries (see the original mods' `handwritten-symbols-botw.csv` for
+provenance/confidence notes on each one) - not guessed or ported from public
+symbol databases.
+
+## Symbols
+
+`data/symbols-wiiu-v208.csv` records addresses, vtable slots and struct field
+offsets established against the **Wii U V208** binary, each with a `confidence`
+column and the evidence behind it:
+
+* `confirmed` - verified two or more independent ways, typically the
+  disassembly of the function itself, the static vtable contents in `.rodata`,
+  and a value read out of a running game.
+* `confirmed-static` - proven from the binary and consistent with the
+  decompilation, but not yet exercised at runtime.
+* `behaviour-confirmed-name-unknown` - behaviour is certain, the C++ name is
+  not. Recorded rather than named.
+
+`docs/region-walls.md` is the companion to the region rows: the `Ecosystem/MapTower.beco`
+raster the fifteen regions are actually defined by, why the map's `OpenCenterPos` flags are
+not that, the five `AirWall` actors and which one survives a runtime spawn, and the `"@S"`
+scale creation param. It ends with what has *not* been run, which is all of it.
+
+`docs/actor-transforms.md` is the long-form companion to those rows: the actor
+transform layout, how to enumerate every live actor off `BaseProcMgr`, the map
+placement array, and the measured finding that **no field on an actor will move
+one the physics drives** - the per-frame physics sync rewrites all of them. Read
+it before adding anything that writes an actor's position.
+
+Add to it when you pin something down, and be honest in the `confidence` column
+- the point of the file is that a `confirmed` row can be relied on without
+re-deriving it. Rows also record what does *not* work: `Actor` field `0x1320`
+is max life, but it is a cache that cannot be written, and the row says so.
+Addresses are V208-specific and do not transfer to Switch.
+
+## Platform coverage
+
+Every WiiXLaunch build targets exactly one platform at compile time
+(`WIIXL_SWITCH` / `WIIXL_WIIU` / `WIIXL_CEMU`), so capability gaps are plain
+`constexpr bool` flags resolved for whichever platform you're building, not
+a runtime check:
+
+| Feature | Switch | Wii U / Cemu |
+| --- | :---: | :---: |
+| Equipped sword/shield/bow | ✅ | ✅ |
+| Actor name (`Actor::GetName`) | ✅ | ✅ |
+| Actor deletion (`Actor::Delete`) | ✅ | ✅ |
+| Controller input | ✅ | ✅ |
+| Camera pos/at/up | ✅ | ✅ |
+| Graphics injection (`NVN::SupportsNVN`) | ✅ | N/A |
+| Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
+| In-game GUI (`GUI::SupportsGUI`) | ❌ (NVN stub) | ✅ (untested in-game) |
+| Equipped item value (`Pouch::SupportsEquippedValue`) | ❌ | ✅ |
+| Armour effects (`Armour::SupportsArmourEffects`) | ❌ | ✅ |
+| In-game clock (`Time::SupportsGameTime`) | ❌ | ✅ |
+| Weather (`Weather::SupportsWeather`) | ❌ | ✅ |
+| Ambient temperature (`Climate::SupportsClimate`) | ❌ | ✅ |
+| Completion percent (`Completion::SupportsCompletion`) | ❌ | ✅ |
+| Map reveal (`Map::SupportsMap`) | ❌ | ✅ |
+| Region lookup + border walls (`Region::SupportsRegion`) | ❌ | ✅ (untested) |
+| Progress events (`Events::SupportsEvents`) | ❌ | ✅ |
+| Player position (`Player::SupportsPosition`) | ❌ | ✅ |
+| Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
+| Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
+| `OSLog` (Cemu `OSReport`) | N/A | Cemu only, no-op on Wii U |
+
+**Spawning caveat:** a spawned actor renders, but is only half-attached - it
+never reaches Calc, and its model is not driven by its proc. It cannot be
+repositioned or removed afterwards; deleting it destroys the proc and leaves the
+model on screen. Fine for placing something permanent, not for anything that
+needs to cycle or clear what it spawned. See `Actor::Spawn` for details.
+
+Switch-unsupported calls are safe no-ops (return `false`/an invalid `Actor`)
+rather than reading an offset that was never confirmed - check the
+`Supports*` flag if your mod needs to branch on it. Filling in the missing
+Switch RE work is welcome; see the confidence notes in the source mods'
+`handwritten-symbols-botw.csv`.
+
+## Using this in a mod
+
+Add it as a submodule of your WiiXLaunch project:
+
+```bash
+git submodule add https://github.com/TKVSC-Team/WiiXLaunch-BotW vendor/wiixlaunch-botw
+git submodule update --init --recursive
+```
+
+Then add its `include/` to your build's include path, alongside your
+project's own `-I include`:
+
+* `build_switch.bat`/`.sh`, `build_wiiu.bat`/`.sh`, `build_cemu.bat`/`.sh`: add `-I vendor\wiixlaunch-botw\include` (or the Linux-path equivalent) next to the existing `-I include`.
+* `CMakeLists.txt` (Switch): add `vendor/wiixlaunch-botw/include` to `target_include_directories`.
+
+No changes to your `main.cpp`'s `#include` lines are needed either way -
+`#include <wiixlaunch/botw/botw.hpp>` resolves the same regardless of
+whether these headers are locally copied or pulled in as a submodule.
+
+## Design conventions
+
+* **Header-only**, matching WiiXLaunch's own `include/wiixlaunch/*.hpp` - no separate `.cpp` to build or link.
+* **Self-installing hooks.** Classes that need a hook expose a static `Init()` (call once from your `WiiXLaunch_Init()`); after that, only call typed getters - no raw offsets or `WIIXL_HOOK_DEFINE_TRAMPOLINE` in your own mod code.
+* **Escape hatches, not a cage.** `Player::GetRaw()` / `Actor::GetRaw()` reach the raw pointer for anything not yet wrapped here.
+* Depends only on WiiXLaunch's core (`platform.hpp`, `hook.hpp`, `call.hpp`) via `#include <wiixlaunch/...>` - resolved through your project's own include path, not assumed to be physically nested next to these files. No dependency on `WIIXL_LOG`/`debug_log.hpp`, since its signature isn't standardized across every WiiXLaunch project.
+
+## License
+
+GPLv3, matching [WiiXLaunch](https://github.com/TKVSC-Team/WiiXLaunch) - see `LICENSE`.

@@ -17,14 +17,8 @@ int kc = 0;
 int wavenumber = 0;
 
 
+// Living enemies as last counted by UpdateWaves (include/ordeal/wave_logic.hpp).
 int alive = 0;
-int lastalive = -1;
-
-void CheckForSwordSpawn() {
-
-    if (!Player::ConsumeAttackEvent()) return;
-
-}
 
 /*
  * Vorraum
@@ -44,34 +38,28 @@ bool isInShrine()
         {
             return true;
         }
-        else
-        {
-            return false;
-        }
-    }
-    else
-    {
         return false;
     }
+    return false;
 }
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
     static void Callback(void* player) {
         timeDerk++;
+        // A reload creates a new player actor; start again at wave 1 then.
+        // Runs before ExecutePendingSpawn so nothing left over from the old
+        // session gets spawned into the new one.
+        if (ResetWavesOnReload(player, wavenumber)) {
+            WIIXL_LOG("Ordeal: reload detected, waves reset");
+        }
         ExecutePendingSpawn();
         Orig(player);
         impl::RawPlayerRef() = player;
         if (isInShrine())
         {
-            if (alive == 0 && lastalive != alive)
-            {
-                wavenumber++;
-                wave(wavenumber);
-            }
-            else
-            {
-                lastalive = alive;
-            }
+            // Starts the next wave once the queue is empty and no enemy is
+            // left alive - see UpdateWaves in include/ordeal/wave_logic.hpp.
+            alive = UpdateWaves(wavenumber);
         }
         else
         {
@@ -103,14 +91,9 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(CreateDropsWithTableHook) {
     // ksys::act::DropMgr::createDropsWithTable(DropMgr* this, Actor* dropper, PendingDrop* pending, DropTable* table)
     static void Callback(void* dropMgr, void* dropper, void* pending, DropTable* table)
     {
-        // This runs for EVERY drop table in the game - pots, crates, ore,
-        // trees - not just for enemies dying. Only an enemy's death counts,
-        // and alive never goes below 0: once it is negative, "alive == 0"
-        // can never be true again and no further wave would ever start.
         const char* name = Actor(dropper).GetName();
         if (name && std::strncmp(name, "Enemy_", 6) == 0) {
             kc += 1;
-            if (alive > 0) alive -= 1;
         }
         Orig(dropMgr, dropper, pending, table);
     }
@@ -130,15 +113,11 @@ extern "C" void WiiXLaunch_Init() {
 
     WIIXL_LOG("WiiXLaunch: init OK");
 
-    // Detect running game version before installing hooks or patches.
     Player::Init();
     Actor::Init();
-    // Every queued spawn counts as one more enemy alive for the wave logic.
-    SetOnPendingSpawnAdded([]() { alive += 1; });
-    Player::OnTick(CheckForSwordSpawn);
+    Ordeal::InitEquip();
     CreateDropsWithTableHook::Install(0, 0x0310b9c8);
     PlayerTickHook::Install(0x873374, 0x02d67cf4);
-    // Register surfaces: core, networking, and base services.
     WiiXLaunch::Core::Register();
 
 #if WIIXL_HAVE_GAME_MODULE

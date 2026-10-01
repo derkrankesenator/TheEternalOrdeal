@@ -1,0 +1,9 @@
+void
+WHBInitializeSocketLibrary()
+{
+}
+
+void
+WHBDeinitializeSocketLibrary()
+{
+}

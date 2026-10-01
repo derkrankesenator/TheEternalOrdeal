@@ -1,0 +1,574 @@
+#include "internal.h"
+#include "logger.h"
+
+#include <stdarg.h>
+
+#include <coreinit/debug.h>
+#include <coreinit/dynload.h>
+#include <notifications/notifications.h>
+
+static OSDynLoad_Module sModuleHandle = nullptr;
+
+static NotificationModuleStatus (*sNMGetVersion)(NotificationModuleAPIVersion *) = nullptr;
+static NotificationModuleStatus (*sNMIsOverlayReady)(bool *)                     = nullptr;
+static NotificationModuleStatus (*sNMAddStaticNotification)(const char *,
+                                                            NotificationModuleNotificationType,
+                                                            float,
+                                                            float,
+                                                            NMColor,
+                                                            NMColor,
+                                                            void (*)(NotificationModuleHandle, void *),
+                                                            void *)              = nullptr;
+
+static NotificationModuleStatus (*sNMAddDynamicNotification)(const char *,
+                                                             NMColor,
+                                                             NMColor,
+                                                             void (*)(NotificationModuleHandle, void *),
+                                                             void *,
+                                                             NotificationModuleHandle *) = nullptr;
+
+static NotificationModuleStatus (*sNMAddStaticNotificationV2)(const char *,
+                                                              NotificationModuleNotificationType,
+                                                              float,
+                                                              float,
+                                                              NMColor,
+                                                              NMColor,
+                                                              void (*)(NotificationModuleHandle, void *),
+                                                              void *,
+                                                              bool) = nullptr;
+
+static NotificationModuleStatus (*sNMAddDynamicNotificationV2)(const char *,
+                                                               NMColor,
+                                                               NMColor,
+                                                               void (*)(NotificationModuleHandle, void *),
+                                                               void *,
+                                                               bool,
+                                                               NotificationModuleHandle *) = nullptr;
+
+static NotificationModuleStatus (*sNMUpdateDynamicNotificationText)(NotificationModuleHandle,
+                                                                    const char *) = nullptr;
+
+static NotificationModuleStatus (*sNMUpdateDynamicNotificationBackgroundColor)(NotificationModuleHandle,
+                                                                               NMColor) = nullptr;
+
+static NotificationModuleStatus (*sNMUpdateDynamicNotificationTextColor)(NotificationModuleHandle,
+                                                                         NMColor) = nullptr;
+
+static NotificationModuleStatus (*sNMFinishDynamicNotification)(NotificationModuleHandle handle,
+                                                                NotificationModuleStatusFinish finishMode,
+                                                                float durationBeforeFadeOutInSeconds,
+                                                                float shakeDurationInSeconds) = nullptr;
+
+static bool sLibInitDone = false;
+
+#define MAX_NOTIFICATION_TYPES 3
+
+static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO < MAX_NOTIFICATION_TYPES);
+static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR < MAX_NOTIFICATION_TYPES);
+static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_DYNAMIC < MAX_NOTIFICATION_TYPES);
+
+static NMDefaultValueStore sDefaultValues[MAX_NOTIFICATION_TYPES];
+
+static NotificationModuleAPIVersion sNotificationModuleVersion = NOTIFICATION_MODULE_API_VERSION_ERROR;
+
+const char *NotificationModule_GetStatusStr(NotificationModuleStatus status) {
+    switch (status) {
+        case NOTIFICATION_MODULE_RESULT_SUCCESS:
+            return "NOTIFICATION_MODULE_RESULT_SUCCESS";
+        case NOTIFICATION_MODULE_RESULT_MODULE_NOT_FOUND:
+            return "NOTIFICATION_MODULE_RESULT_MODULE_NOT_FOUND";
+        case NOTIFICATION_MODULE_RESULT_MODULE_MISSING_EXPORT:
+            return "NOTIFICATION_MODULE_RESULT_MODULE_MISSING_EXPORT";
+        case NOTIFICATION_MODULE_RESULT_UNSUPPORTED_VERSION:
+            return "NOTIFICATION_MODULE_RESULT_UNSUPPORTED_VERSION";
+        case NOTIFICATION_MODULE_RESULT_UNKNOWN_ERROR:
+            return "NOTIFICATION_MODULE_RESULT_UNKNOWN_ERROR";
+        case NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT:
+            return "NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT";
+        case NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED:
+            return "NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED";
+        case NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND:
+            return "NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND";
+        case NOTIFICATION_MODULE_RESULT_OVERLAY_NOT_READY:
+            return "NOTIFICATION_MODULE_RESULT_OVERLAY_NOT_READY";
+        case NOTIFICATION_MODULE_RESULT_UNSUPPORTED_TYPE:
+            return "NOTIFICATION_MODULE_RESULT_UNSUPPORTED_TYPE";
+        case NOTIFICATION_MODULE_RESULT_ALLOCATION_FAILED:
+            return "NOTIFICATION_MODULE_RESULT_ALLOCATION_FAILED";
+        case NOTIFICATION_MODULE_RESULT_INVALID_HANDLE:
+            return "NOTIFICATION_MODULE_RESULT_INVALID_HANDLE";
+    }
+    return "NOTIFICATION_MODULE_RESULT_UNKNOWN_ERROR";
+}
+
+NotificationModuleStatus NotificationModule_InitLibrary() {
+    if (sLibInitDone) {
+        return NOTIFICATION_MODULE_RESULT_SUCCESS;
+    }
+    if (OSDynLoad_Acquire("homebrew_notifications", &sModuleHandle) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("OSDynLoad_Acquire failed.");
+        return NOTIFICATION_MODULE_RESULT_MODULE_NOT_FOUND;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMGetVersion", (void **) &sNMGetVersion) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMGetVersion failed.");
+        return NOTIFICATION_MODULE_RESULT_MODULE_MISSING_EXPORT;
+    }
+
+    auto res = NotificationModule_GetVersion(&sNotificationModuleVersion);
+    if (res != NOTIFICATION_MODULE_RESULT_SUCCESS) {
+        sNotificationModuleVersion = NOTIFICATION_MODULE_API_VERSION_ERROR;
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_VERSION;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMIsOverlayReady", (void **) &sNMIsOverlayReady) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMIsOverlayReady failed.");
+        sNMIsOverlayReady = nullptr;
+    }
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMAddStaticNotification", (void **) &sNMAddStaticNotification) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMAddStaticNotification failed.");
+        sNMAddStaticNotification = nullptr;
+    }
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMAddDynamicNotification", (void **) &sNMAddDynamicNotification) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMAddDynamicNotification failed.");
+        sNMAddDynamicNotification = nullptr;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMUpdateDynamicNotificationText", (void **) &sNMUpdateDynamicNotificationText) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMUpdateDynamicNotificationText failed.");
+        sNMUpdateDynamicNotificationText = nullptr;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMUpdateDynamicNotificationBackgroundColor", (void **) &sNMUpdateDynamicNotificationBackgroundColor) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMUpdateDynamicNotificationBackgroundColor failed.");
+        sNMUpdateDynamicNotificationBackgroundColor = nullptr;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMUpdateDynamicNotificationTextColor", (void **) &sNMUpdateDynamicNotificationTextColor) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMUpdateDynamicNotificationTextColor failed.");
+        sNMUpdateDynamicNotificationTextColor = nullptr;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMFinishDynamicNotification", (void **) &sNMFinishDynamicNotification) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMFinishDynamicNotification failed.");
+        sNMFinishDynamicNotification = nullptr;
+    }
+
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMAddDynamicNotificationV2", (void **) &sNMAddDynamicNotificationV2) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMAddDynamicNotificationV2 failed.");
+        sNMAddDynamicNotificationV2 = nullptr;
+    }
+    if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMAddStaticNotificationV2", (void **) &sNMAddStaticNotificationV2) != OS_DYNLOAD_OK) {
+        DEBUG_FUNCTION_LINE_ERR("FindExport NMAddStaticNotificationV2 failed.");
+        sNMAddStaticNotificationV2 = nullptr;
+    }
+
+    for (auto &sDefaultValue : sDefaultValues) {
+        sDefaultValue = NMDefaultValueStore(); // Reset to defaults
+    }
+
+    // Set specific default for Error
+    if constexpr (NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR < MAX_NOTIFICATION_TYPES) {
+        sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR].backgroundColor = {237, 28, 36, 255};
+    }
+
+    sLibInitDone = true;
+    return NOTIFICATION_MODULE_RESULT_SUCCESS;
+}
+
+NotificationModuleStatus NotificationModule_DeInitLibrary() {
+    if (sLibInitDone) {
+        sNMGetVersion              = nullptr;
+        sNotificationModuleVersion = NOTIFICATION_MODULE_API_VERSION_ERROR;
+        OSDynLoad_Release(sModuleHandle);
+        sModuleHandle = nullptr;
+        sLibInitDone  = false;
+    }
+    return NOTIFICATION_MODULE_RESULT_SUCCESS;
+}
+
+NotificationModuleStatus NotificationModule_GetVersion(NotificationModuleAPIVersion *outVersion) {
+    if (sNMGetVersion == nullptr) {
+        if (OSDynLoad_Acquire("homebrew_notifications", &sModuleHandle) != OS_DYNLOAD_OK) {
+            DEBUG_FUNCTION_LINE_WARN("OSDynLoad_Acquire failed.");
+            return NOTIFICATION_MODULE_RESULT_MODULE_NOT_FOUND;
+        }
+
+        if (OSDynLoad_FindExport(sModuleHandle, OS_DYNLOAD_EXPORT_FUNC, "NMGetVersion", (void **) &sNMGetVersion) != OS_DYNLOAD_OK) {
+            DEBUG_FUNCTION_LINE_WARN("FindExport NMGetVersion failed.");
+            return NOTIFICATION_MODULE_RESULT_MODULE_MISSING_EXPORT;
+        }
+    }
+
+    return sNMGetVersion(outVersion);
+}
+
+NotificationModuleStatus NotificationModule_IsOverlayReady(bool *outIsReady) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMIsOverlayReady == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (outIsReady == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    return sNMIsOverlayReady(outIsReady);
+}
+
+NotificationModuleStatus NotificationModule_AddDynamicNotificationEx(const char *text,
+                                                                     NotificationModuleHandle *outHandle,
+                                                                     NMColor textColor,
+                                                                     NMColor backgroundColor,
+                                                                     void (*finishFunc)(NotificationModuleHandle, void *context),
+                                                                     void *context,
+                                                                     bool keepUntilShown) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMAddDynamicNotification == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (text == nullptr || outHandle == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    if (sNotificationModuleVersion == 2) {
+        if (sNMAddDynamicNotificationV2 == nullptr) {
+            return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+        }
+        return sNMAddDynamicNotificationV2(text,
+                                           textColor,
+                                           backgroundColor,
+                                           finishFunc,
+                                           context,
+                                           keepUntilShown,
+                                           outHandle);
+    }
+
+    return sNMAddDynamicNotification(text,
+                                     textColor,
+                                     backgroundColor,
+                                     finishFunc,
+                                     context,
+                                     outHandle);
+}
+
+NotificationModuleStatus NotificationModule_AddDynamicNotification(const char *text, NotificationModuleHandle *outHandle) {
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_DYNAMIC < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_DYNAMIC];
+    return NotificationModule_AddDynamicNotificationEx(text,
+                                                       outHandle,
+                                                       cur.textColor,
+                                                       cur.backgroundColor,
+                                                       cur.finishFunc,
+                                                       cur.finishFuncContext,
+                                                       cur.keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_AddDynamicNotificationWithCallback(const char *text,
+                                                                               NotificationModuleHandle *outHandle,
+                                                                               NotificationModuleNotificationFinishedCallback callback,
+                                                                               void *callbackContext) {
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_DYNAMIC < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_DYNAMIC];
+    return NotificationModule_AddDynamicNotificationEx(text,
+                                                       outHandle,
+                                                       cur.textColor,
+                                                       cur.backgroundColor,
+                                                       callback,
+                                                       callbackContext,
+                                                       cur.keepUntilShown);
+}
+
+static NotificationModuleStatus NotificationModule_AddStaticNotification(const char *text,
+                                                                         NotificationModuleNotificationType type,
+                                                                         float durationBeforeFadeOutInSeconds,
+                                                                         float shakeDurationInSeconds,
+                                                                         NMColor textColor,
+                                                                         NMColor backgroundColor,
+                                                                         NotificationModuleNotificationFinishedCallback callback,
+                                                                         void *callbackContext,
+                                                                         bool keepUntilShown) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMAddStaticNotification == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (text == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    if (sNotificationModuleVersion == 2) {
+        if (sNMAddStaticNotificationV2 == nullptr) {
+            return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+        }
+        return sNMAddStaticNotificationV2(text,
+                                          type,
+                                          durationBeforeFadeOutInSeconds,
+                                          shakeDurationInSeconds,
+                                          textColor,
+                                          backgroundColor,
+                                          callback,
+                                          callbackContext,
+                                          keepUntilShown);
+    }
+    return sNMAddStaticNotification(text,
+                                    type,
+                                    durationBeforeFadeOutInSeconds,
+                                    shakeDurationInSeconds,
+                                    textColor,
+                                    backgroundColor,
+                                    callback,
+                                    callbackContext);
+}
+
+#undef NotificationModule_SetDefaultValue
+NotificationModuleStatus NotificationModule_SetDefaultValue(NotificationModuleNotificationType type,
+                                                            NotificationModuleNotificationOption valueType,
+                                                            ...) {
+    if (sModuleHandle == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+
+    if (type < 0 || type >= MAX_NOTIFICATION_TYPES) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    va_list va;
+
+    auto &cur = sDefaultValues[type];
+    va_start(va, valueType);
+    auto res = NOTIFICATION_MODULE_RESULT_SUCCESS;
+    switch (valueType) {
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_BACKGROUND_COLOR: {
+            auto arg            = va_arg(va, NMColor);
+            cur.backgroundColor = arg;
+            break;
+        }
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_TEXT_COLOR: {
+            auto arg      = va_arg(va, NMColor);
+            cur.textColor = arg;
+            break;
+        }
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_DURATION_BEFORE_FADE_OUT: {
+            auto arg                           = va_arg(va, double);
+            cur.durationBeforeFadeOutInSeconds = (float) arg;
+            break;
+        }
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_FINISH_FUNCTION: {
+            auto arg       = va_arg(va, void (*)(NotificationModuleHandle, void *));
+            cur.finishFunc = arg;
+            break;
+        }
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_FINISH_FUNCTION_CONTEXT: {
+            auto arg              = va_arg(va, void *);
+            cur.finishFuncContext = arg;
+            break;
+        }
+        case NOTIFICATION_MODULE_DEFAULT_OPTION_KEEP_UNTIL_SHOWN: {
+            auto arg           = va_arg(va, int);
+            cur.keepUntilShown = (bool) arg;
+            break;
+        }
+        default:
+            res = NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+            break;
+    }
+
+    va_end(va);
+
+    return res;
+}
+
+NotificationModuleStatus NotificationModule_AddInfoNotificationEx(const char *text,
+                                                                  float durationBeforeFadeOutInSeconds,
+                                                                  NMColor textColor,
+                                                                  NMColor backgroundColor,
+                                                                  NotificationModuleNotificationFinishedCallback callback,
+                                                                  void *callbackContext,
+                                                                  bool keepUntilShown) {
+    return NotificationModule_AddStaticNotification(text,
+                                                    NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO,
+                                                    durationBeforeFadeOutInSeconds,
+                                                    0.0f,
+                                                    textColor,
+                                                    backgroundColor,
+                                                    callback,
+                                                    callbackContext,
+                                                    keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_AddInfoNotification(const char *text) {
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO];
+    return NotificationModule_AddInfoNotificationEx(text,
+                                                    cur.durationBeforeFadeOutInSeconds,
+                                                    cur.textColor,
+                                                    cur.backgroundColor,
+                                                    cur.finishFunc,
+                                                    cur.finishFuncContext,
+                                                    cur.keepUntilShown);
+}
+NotificationModuleStatus NotificationModule_AddInfoNotificationWithCallback(const char *text,
+                                                                            NotificationModuleNotificationFinishedCallback callback,
+                                                                            void *callbackContext) {
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_INFO];
+    return NotificationModule_AddInfoNotificationEx(text,
+                                                    cur.durationBeforeFadeOutInSeconds,
+                                                    cur.textColor,
+                                                    cur.backgroundColor,
+                                                    callback,
+                                                    callbackContext,
+                                                    cur.keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_AddErrorNotificationEx(const char *text,
+                                                                   float durationBeforeFadeOutInSeconds,
+                                                                   float shakeDurationInSeconds,
+                                                                   NMColor textColor,
+                                                                   NMColor backgroundColor,
+                                                                   NotificationModuleNotificationFinishedCallback callback,
+                                                                   void *callbackContext,
+                                                                   bool keepUntilShown) {
+    return NotificationModule_AddStaticNotification(text,
+                                                    NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR,
+                                                    durationBeforeFadeOutInSeconds,
+                                                    shakeDurationInSeconds,
+                                                    textColor,
+                                                    backgroundColor,
+                                                    callback,
+                                                    callbackContext,
+                                                    keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_AddErrorNotification(const char *text) {
+    if (sModuleHandle == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR];
+    return NotificationModule_AddErrorNotificationEx(text,
+                                                     cur.durationBeforeFadeOutInSeconds,
+                                                     cur.shakeDurationOnErrorInSeconds,
+                                                     cur.textColor,
+                                                     cur.backgroundColor,
+                                                     cur.finishFunc,
+                                                     cur.finishFuncContext,
+                                                     cur.keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_AddErrorNotificationWithCallback(const char *text,
+                                                                             NotificationModuleNotificationFinishedCallback callback,
+                                                                             void *callbackContext) {
+    if (sModuleHandle == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+
+    static_assert(NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR < MAX_NOTIFICATION_TYPES);
+    auto &cur = sDefaultValues[NOTIFICATION_MODULE_NOTIFICATION_TYPE_ERROR];
+    return NotificationModule_AddErrorNotificationEx(text,
+                                                     cur.durationBeforeFadeOutInSeconds,
+                                                     cur.shakeDurationOnErrorInSeconds,
+                                                     cur.textColor,
+                                                     cur.backgroundColor,
+                                                     callback,
+                                                     callbackContext,
+                                                     cur.keepUntilShown);
+}
+
+NotificationModuleStatus NotificationModule_UpdateDynamicNotificationText(NotificationModuleHandle handle,
+                                                                          const char *text) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMUpdateDynamicNotificationText == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (handle == 0 || text == nullptr) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    return sNMUpdateDynamicNotificationText(handle,
+                                            text);
+}
+
+NotificationModuleStatus NotificationModule_UpdateDynamicNotificationBackgroundColor(NotificationModuleHandle handle,
+                                                                                     NMColor backgroundColor) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMUpdateDynamicNotificationBackgroundColor == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (handle == 0) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    return sNMUpdateDynamicNotificationBackgroundColor(handle,
+                                                       backgroundColor);
+}
+
+NotificationModuleStatus NotificationModule_UpdateDynamicNotificationTextColor(NotificationModuleHandle handle,
+                                                                               NMColor textColor) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMUpdateDynamicNotificationTextColor == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (handle == 0) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    return sNMUpdateDynamicNotificationTextColor(handle,
+                                                 textColor);
+}
+
+static NotificationModuleStatus NotificationModule_FinishDynamicNotificationEx(NotificationModuleHandle handle,
+                                                                               NotificationModuleStatusFinish finishMode,
+                                                                               float durationBeforeFadeOutInSeconds,
+                                                                               float shakeDurationInSeconds) {
+    if (sNotificationModuleVersion == NOTIFICATION_MODULE_API_VERSION_ERROR) {
+        return NOTIFICATION_MODULE_RESULT_LIB_UNINITIALIZED;
+    }
+    if (sNMFinishDynamicNotification == nullptr || sNotificationModuleVersion < 1) {
+        return NOTIFICATION_MODULE_RESULT_UNSUPPORTED_COMMAND;
+    }
+
+    if (handle == 0) {
+        return NOTIFICATION_MODULE_RESULT_INVALID_ARGUMENT;
+    }
+
+    return sNMFinishDynamicNotification(handle,
+                                        finishMode,
+                                        durationBeforeFadeOutInSeconds,
+                                        shakeDurationInSeconds);
+}
+
+NotificationModuleStatus NotificationModule_FinishDynamicNotification(NotificationModuleHandle handle,
+                                                                      float durationBeforeFadeOutInSeconds) {
+    return NotificationModule_FinishDynamicNotificationEx(handle,
+                                                          NOTIFICATION_MODULE_STATUS_FINISH,
+                                                          durationBeforeFadeOutInSeconds,
+                                                          0.0f);
+}
+
+NotificationModuleStatus NotificationModule_FinishDynamicNotificationWithShake(NotificationModuleHandle handle,
+                                                                               float durationBeforeFadeOutInSeconds,
+                                                                               float shakeDuration) {
+    return NotificationModule_FinishDynamicNotificationEx(handle,
+                                                          NOTIFICATION_MODULE_STATUS_FINISH_WITH_SHAKE,
+                                                          durationBeforeFadeOutInSeconds,
+                                                          shakeDuration);
+}
